@@ -1,0 +1,98 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv/
+cdk/.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-project
+*.sublime-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+~$*.docx
+~$*.xlsx
+*.tmp
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+
+# AWS CDK
+cdk.out/
+cdk/cdk.out/
+cdk/cdk-outputs.json
+cdk/cdk-outputs.tmp.json
+cdk/logs-config.json
+cdk/kms-config.json
+cdk/datacatalog-config.json
+cdk/deploy-config.json
+cdk.context.json
+
+# Build artifacts
+build/
+*.zip
+
+# ASH (security scanner)
+.ash/
+
+# Hypothesis (property-based testing)
+.hypothesis/
+cdk/.hypothesis/
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Generated reports and exports
+quicksuite_*.csv
+quicksuite_*.json
+quicksight_*.csv
+quicksight_*.json
+
+# Node modules
+node_modules/
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# Kiro
+.kiro/
+
+# Temporary files
+*.bak
+*~

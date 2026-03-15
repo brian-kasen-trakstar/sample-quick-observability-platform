@@ -1,0 +1,36 @@
+-- Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+-- SPDX-License-Identifier: MIT-0
+CREATE EXTERNAL TABLE IF NOT EXISTS ${DATABASE}.agent_hours_logs (
+  timestamp STRING,
+  log_group STRING,
+  log_stream STRING,
+  message_type STRING,
+  user_arn STRING,
+  subscription_type STRING,
+  reporting_service STRING,
+  usage_group STRING,
+  usage_hours DOUBLE,
+  service_resource_arn STRING,
+  resource_arn STRING,
+  account_id STRING,
+  event_timestamp BIGINT
+)
+PARTITIONED BY (
+  year INT,
+  month INT,
+  day INT
+)
+ROW FORMAT SERDE 'org.openx.data.jsonserde.JsonSerDe'
+LOCATION 's3://${BUCKET}/cloudwatch-logs/agent-hours/'
+TBLPROPERTIES (
+  'projection.enabled' = 'true',
+  'projection.year.type' = 'integer',
+  'projection.year.range' = '2024,2030',
+  'projection.month.type' = 'integer',
+  'projection.month.range' = '1,12',
+  'projection.month.digits' = '2',
+  'projection.day.type' = 'integer',
+  'projection.day.range' = '1,31',
+  'projection.day.digits' = '2',
+  'storage.location.template' = 's3://${BUCKET}/cloudwatch-logs/agent-hours/year=${year}/month=${month}/day=${day}'
+);
