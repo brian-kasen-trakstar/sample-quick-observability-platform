@@ -223,17 +223,25 @@ Creates:
 
 ### Step 6: Create a custom chat agent
 
-Create an Amazon Quick [custom chat agent](https://docs.aws.amazon.com/quick/latest/userguide/custom-agents.html) that uses the Quick Sight topic from Step 5 to answer natural language questions about adoption, usage, cost, and governance.
+Create an Amazon Quick [custom chat agent](https://docs.aws.amazon.com/quick/latest/userguide/custom-agents.html) that uses the Quick Sight topic from Step 5 to answer natural language questions about adoption, usage, cost, and governance. This step is performed through the Amazon Quick console.
 
-1. Open the Amazon Quick console → **Chat Agents** → **Create agent**
+**Create a Quick Space:**
+
+1. Open the Amazon Quick console → **Spaces** → **Create space**
+2. Enter a name and description for your space
+3. Select **Add knowledge** → choose **Topics** → select **Quick Observability**
+
+**Create a Quick custom chat agent:**
+
+1. Open the Amazon Quick console → **Chat agents** → **Create chat agent**
 2. Enter the following:
    - **Name**: `Quick Observability Insights`
    - **Description**: `Provides business leaders and administrators with actionable insights on Amazon Quick adoption, usage, performance, agent hours, costs, user satisfaction, and API activity using observability data.`
-3. Under **Topics**, select the **Quick Observability** topic created in Step 5
-4. Under **Instructions**, paste the prompt from [`docs/Quick custom chat agent.txt`](docs/Quick%20custom%20chat%20agent.txt)
-5. Save and publish the agent
+3. Under **Instructions**, paste the prompt from [`docs/Quick custom chat agent.txt`](docs/Quick%20custom%20chat%20agent.txt)
+4. Under **Knowledge sources**, choose **Link Spaces** and select the Quick Observability space
+5. Select **Launch chat agent** to publish the agent to the chat agent library
 
-The agent prompt configures the chat agent to provide structured responses with executive summaries, key metrics, Highcharts visualizations, and actionable recommendations. Users can ask questions like "Top features this month?", "Agent hours by service?", or "User satisfaction trends?" and receive data-driven answers with charts.
+Users can ask questions like "Top features this month?", "Agent hours by service?", or "User satisfaction trends?" and receive data-driven answers with metrics, charts, and actionable recommendations.
 
 ### Clean up
 
