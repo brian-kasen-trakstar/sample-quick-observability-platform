@@ -69,6 +69,26 @@ The data catalog (Glue database, Athena tables, views, optional Lake Formation) 
 - AWS CDK CLI (`npm install -g aws-cdk`) or `npx` (auto-detected by `deploy.py`)
 - Amazon Quick subscription (Professional or Enterprise)
 
+### Deploying from Windows
+
+This solution was developed and tested on macOS and Linux. To deploy from Windows, apply the following modifications:
+
+**`cdk/cdk.json`**
+- Change `"app": ".venv/bin/python3 app.py"` to `"app": "python app.py"`
+
+**`deploy.py`**
+- In `setup_venv()`, replace `"python3"` with `sys.executable`
+- In `get_venv_python()`, return `Scripts/python.exe` instead of `bin/python3`
+- In `deploy_cdk()` and `bootstrap_cdk()`, add `shell=(os.name == "nt")` to `subprocess.run` calls that invoke CDK
+- In `deploy_cdk()`, add `env["HOME"] = os.environ.get("USERPROFILE", os.path.expanduser("~"))` to the environment dict passed to CDK
+
+**`cleanup.py`**
+- In `destroy_cdk_stack()`, add `shell=(os.name == "nt")` to the `subprocess.run` call
+- In `destroy_cdk_stack()`, add `env["HOME"] = os.environ.get("USERPROFILE", os.path.expanduser("~"))` to the environment dict passed to CDK
+
+**`scripts/create_topic.py`**
+- Change `os.path.join("cdk", ".venv", "bin", "python3")` to `os.path.join("cdk", ".venv", "Scripts", "python.exe")`
+
 ### IAM permissions
 
 The deploying identity needs permissions to create and manage the following AWS resources: a customer-managed KMS key with key policies and aliases, CloudWatch Log Groups with data protection policies and vended logs delivery configuration, an S3 bucket with encryption and bucket policies, Lambda functions with IAM execution roles, Amazon Data Firehose delivery streams, EventBridge rules, CloudWatch Logs subscription filters, and IAM roles with scoped policies for each service. The identity also needs permission to deploy and destroy CloudFormation stacks (used by CDK), assume CDK bootstrap roles, and call `sts:GetCallerIdentity` for account and region detection.
@@ -162,6 +182,8 @@ Runs `scripts/setup_datacatalog.py` which provisions:
 - Lake Formation permissions (optional — prompted during setup): S3 data location registration, KMS key policy update for Lake Formation service-linked role, DATA_LOCATION_ACCESS grants, database-level grants, per-table SELECT/DESCRIBE grants for the caller and Quick Sight service role. When message content logging is enabled, the Quick Sight service role grant on `chat_logs` uses column-level exclusion to prevent access to `user_message` and `system_text_message` — the admin caller retains full access to all columns.
 
 Prompts for: AWS CLI profile, Athena database name, workgroup name, S3 location for query results, and access control mode (Lake Formation or IAM). If message content logging was enabled in Step 1, the `chat_logs` table includes `user_message` and `system_text_message` columns.
+
+> **Note:** This solution grants data lake and Athena table/view access to the `aws-quicksight-service-role-v0` IAM role. In cross-account configurations or when using Athena federation, Amazon Quick may use `aws-quicksight-s3-consumers-role-v0` instead. If your environment uses `aws-quicksight-s3-consumers-role-v0` or a custom IAM role, grant that role the required permissions (S3 read access to the data lake bucket, Athena query execution, Glue Data Catalog access, and KMS decrypt) and update the Lake Formation grants to reference it.
 
 **After this step**, verify data is flowing to all Athena tables:
 
