@@ -62,8 +62,27 @@ def run(cmd, capture=True, check=True):
     return result.stdout.strip() if capture and result.stdout else ""
 
 
+def using_env_credentials():
+    """Return True if AWS credentials are provided via environment variables."""
+    return bool(os.environ.get("AWS_ACCESS_KEY_ID"))
+
+
 def run_aws(args):
     """Run an AWS CLI command, return (success, output)."""
+    # When env var credentials are active (e.g. MFA session token), strip
+    # any --profile argument so env vars are not overridden by a named profile.
+    if using_env_credentials():
+        filtered = []
+        skip_next = False
+        for arg in args:
+            if skip_next:
+                skip_next = False
+                continue
+            if arg == "--profile":
+                skip_next = True
+                continue
+            filtered.append(arg)
+        args = filtered
     result = subprocess.run(["aws"] + args, capture_output=True, text=True)
     output = (result.stdout or "").strip() or (result.stderr or "").strip()
     return result.returncode == 0, output
@@ -165,8 +184,9 @@ def deploy_cdk(cdk_cmd, stack_name, context, profile):
         "--require-approval", "never",
         "--exclusively",
         "--outputs-file", "cdk-outputs.tmp.json",
-        "--profile", profile,
     ]
+    if not using_env_credentials():
+        cmd += ["--profile", profile]
     for key, value in context.items():
         cmd.extend(["--context", f"{key}={value}"])
 
@@ -251,7 +271,9 @@ def bootstrap_cdk(cdk_cmd, account_id, region, profile):
     ])
     if not ok:
         print("🚀 Bootstrapping CDK (first time only)")
-        cmd = cdk_cmd + ["bootstrap", f"aws://{account_id}/{region}", "--profile", profile]
+        cmd = cdk_cmd + ["bootstrap", f"aws://{account_id}/{region}"]
+        if not using_env_credentials():
+            cmd += ["--profile", profile]
         result = subprocess.run(cmd)
         if result.returncode != 0:
             print("❌ CDK bootstrap failed.")
