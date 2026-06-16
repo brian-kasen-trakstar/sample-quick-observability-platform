@@ -365,6 +365,7 @@ def main():
     feedback_logs = "/aws/vendedlogs/quick/feedback"
     agent_hours_logs = "/aws/vendedlogs/quick/agent-hours"
     index_usage_logs = "/aws/vendedlogs/quick/index-usage"
+    custom_agent_ids = []
 
     if deploy_logs:
         print("📝 CloudWatch log group names:")
@@ -374,6 +375,24 @@ def main():
         feedback_logs = prompt("  Feedback logs group", feedback_logs)
         agent_hours_logs = prompt("  Agent hours logs group", agent_hours_logs)
         index_usage_logs = prompt("  Index usage logs group", index_usage_logs)
+        print()
+        
+        # Custom agents support
+        print("📝 Custom agents (optional):")
+        print("   To capture logs from custom agents, provide agent IDs.")
+        print("   Each agent gets its own dedicated log group.")
+        print("   Leave blank to skip custom agent logging.")
+        print()
+        while True:
+            agent_id = prompt("  Agent ID (or press Enter to finish)", "").strip()
+            if not agent_id:
+                break
+            custom_agent_ids.append(agent_id)
+            print(f"    ✓ Agent {agent_id} will log to /aws/vendedlogs/quick/agent/{agent_id}")
+        if custom_agent_ids:
+            print(f"  ✓ {len(custom_agent_ids)} custom agent(s) configured")
+        else:
+            print("  ✓ Custom agent logging skipped")
         print()
 
         # Message content opt-in
@@ -415,6 +434,8 @@ def main():
         print(f"  Feedback Logs: {feedback_logs}")
         print(f"  Agent Hours Logs: {agent_hours_logs}")
         print(f"  Index Usage Logs: {index_usage_logs}")
+        if custom_agent_ids:
+            print(f"  Custom Agents: {', '.join(custom_agent_ids)}")
         print(f"  Message Content: {'included' if include_message_content else 'excluded'}")
         print()
         confirm = input("Proceed? (y/N): ").strip().lower()
@@ -448,6 +469,10 @@ def main():
         "agentHoursLogsGroup": agent_hours_logs,
         "indexUsageLogsGroup": index_usage_logs,
     }
+    if custom_agent_ids:
+        agent_logs_list = [f"/aws/vendedlogs/quick/agent/{agent_id}" for agent_id in custom_agent_ids]
+        context["customAgentIds"] = ",".join(custom_agent_ids)
+        context["customAgentLogsGroups"] = ",".join(agent_logs_list)
 
     # Deploy Logs Stack (Step 1)
     if deploy_logs:
@@ -481,11 +506,14 @@ def main():
         deploy_cdk(cdk_cmd, pipeline_stack_name, context, profile)
 
     # Done
-    save_deploy_config({
+    config_to_save = {
         "AWSProfile": profile,
         "ResourcePrefix": resource_prefix,
         "Region": region,
-    })
+    }
+    if custom_agent_ids:
+        config_to_save["CustomAgentIds"] = custom_agent_ids
+    save_deploy_config(config_to_save)
     print()
     if deploy_logs:
         print("  ✓ AWS KMS key deployed with automatic rotation")
@@ -493,6 +521,9 @@ def main():
         print()
         print("  Generate data by using Amazon Quick:")
         print("    • Chat logs: ask questions using the chat agent (My Assistant)")
+        if custom_agent_ids:
+            for agent_id in custom_agent_ids:
+                print(f"    • Agent {agent_id}: use your custom agent")
         print("    • Feedback logs: provide thumbs up/down on chat responses")
         print("    • Agent hours: use Flows, Research, or Automations")
         print("    • Index usage logs: create or update a Space or Knowledge Base")

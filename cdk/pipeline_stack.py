@@ -183,6 +183,21 @@ class PipelineStack(Stack):
             assumed_by=iam.ServicePrincipal("logs.amazonaws.com")
         )
 
+        # CloudWatch Logs needs KMS permissions when writing test records to
+        # CMK-encrypted Firehose streams during SubscriptionFilter creation.
+        cloudwatch_logs_role.add_to_policy(
+            iam.PolicyStatement(
+                effect=iam.Effect.ALLOW,
+                actions=[
+                    "kms:Decrypt",
+                    "kms:Encrypt",
+                    "kms:GenerateDataKey",
+                    "kms:DescribeKey",
+                ],
+                resources=[self.data_lake_key.key_arn]
+            )
+        )
+
         # Grant KMS permissions via IAM policy (the key policy in LogsStack
         # grants account root access, so IAM policies are sufficient)
         lambda_role.add_to_policy(
