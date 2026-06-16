@@ -585,9 +585,9 @@ def deploy_datacatalog():
     else:
         profile = prompt("Enter AWS CLI profile", "default")
 
-    # Prompt for database name and verify it doesn't already exist.
-    # This script creates a new database — using an existing one risks
-    # overwriting tables that belong to other workloads.
+    # Prompt for database name and allow reusing an existing one.
+    # Reusing an existing database can overwrite tables if names collide,
+    # so require explicit confirmation.
     while True:
         database = prompt("Enter Athena database name", "quickobserve_db")
         ok, _ = run_aws([
@@ -597,7 +597,13 @@ def deploy_datacatalog():
             "--region", region,
         ])
         if ok:
-            print(f"  ⚠ Database '{database}' already exists. Enter a name that does not exist yet.")
+            print(f"  ⚠ Database '{database}' already exists.")
+            reuse_existing = input("  Use this existing database? (y/N): ").strip().lower() == "y"
+            if reuse_existing:
+                print(f"  ✓ Reusing existing database: {database}")
+                print()
+                break
+            print("  Enter a different database name.")
             print()
         else:
             break
@@ -684,7 +690,6 @@ def deploy_datacatalog():
 
     catalog_cmd = [
         venv_python, "scripts/setup_datacatalog.py",
-        "--profile", profile,
         "--region", region,
         "--database", database,
         "--bucket", bucket,
@@ -692,12 +697,17 @@ def deploy_datacatalog():
         "--output-location", athena_output,
         "--access-control", access_mode,
     ]
+    if not using_env_credentials():
+        catalog_cmd.extend(["--profile", profile])
     if use_lake_formation and kms_key_arn:
         catalog_cmd.extend(["--kms-key-arn", kms_key_arn])
     if include_message_content:
         catalog_cmd.append("--include-message-content")
 
-    os.environ["AWS_PROFILE"] = profile
+    if not using_env_credentials():
+        os.environ["AWS_PROFILE"] = profile
+    elif "AWS_PROFILE" in os.environ:
+        del os.environ["AWS_PROFILE"]
     os.environ["AWS_DEFAULT_REGION"] = region
     result = subprocess.run(catalog_cmd)
     if result.returncode != 0:

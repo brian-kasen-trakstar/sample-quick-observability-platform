@@ -16,7 +16,7 @@ Two access control modes:
 
 Usage:
     python3 setup_datacatalog.py \\
-        --profile default --region us-east-1 \\
+        --region us-east-1 [--profile default] \\
         --database quickobserve_db --bucket my-data-lake \\
         --workgroup primary --output-location s3://my-bucket/athena-results/ \\
         --access-control lakeformation [--kms-key-arn arn:aws:kms:...]
@@ -28,6 +28,7 @@ import argparse
 import re
 import sys
 import time
+import os
 from pathlib import Path
 
 
@@ -164,6 +165,30 @@ def lf_grant_table(lf, account_id, database, table_name, principal):
     return ok
 
 
+def lf_enable_iam_mode_compat(lf, account_id, database, s3_arn, caller_arn):
+    """In IAM mode, add Lake Formation grants for the caller principal.
+
+    This is required in accounts where Lake Formation governance is enabled,
+    otherwise Athena DDL can fail with Insufficient Lake Formation permission(s)
+    even when users choose IAM access control.
+    """
+    # Allow the current caller to use the data location for external tables.
+    resource_loc = {"DataLocation": {"CatalogId": account_id, "ResourceArn": s3_arn}}
+    ok_loc = lf_grant(lf, caller_arn, resource_loc, ["DATA_LOCATION_ACCESS"])
+
+    # Allow the current caller to manage tables in this database.
+    resource_db = {"Database": {"CatalogId": account_id, "Name": database}}
+    ok_db = lf_grant(
+        lf,
+        caller_arn,
+        resource_db,
+        ["CREATE_TABLE", "ALTER", "DROP", "DESCRIBE"],
+    )
+
+    if not ok_loc or not ok_db:
+        raise RuntimeError("Failed to apply required Lake Formation IAM compatibility grants")
+
+
 # Columns that contain sensitive chat content (user questions and AI responses).
 # These may include data from connected enterprise sources (databases, S3, etc.).
 # When message content logging is enabled, Lake Formation column-level exclusion
@@ -201,7 +226,7 @@ def lf_grant_table_exclude_columns(lf, account_id, database, table_name, princip
 
 def main():
     parser = argparse.ArgumentParser(description="Set up data catalog")
-    parser.add_argument("--profile", default="default", help="AWS profile")
+    parser.add_argument("--profile", help="AWS profile")
     parser.add_argument("--region", default="us-east-1", help="AWS region")
     parser.add_argument("--database", required=True, help="Athena/Glue database name")
     parser.add_argument("--bucket", required=True, help="Data lake S3 bucket name")
@@ -225,7 +250,11 @@ def main():
         print(f"✗ Invalid workgroup name: {args.workgroup}")
         return 1
 
-    session = boto3.Session(profile_name=args.profile, region_name=args.region)
+    use_env_credentials = bool(os.environ.get("AWS_ACCESS_KEY_ID"))
+    if use_env_credentials:
+        session = boto3.Session(region_name=args.region)
+    else:
+        session = boto3.Session(profile_name=args.profile or "default", region_name=args.region)
     sts = session.client("sts")
     account_id = sts.get_caller_identity()["Account"]
     caller_arn = sts.get_caller_identity()["Arn"]
@@ -301,7 +330,18 @@ def main():
     print(f"  Creating database: {database}")
     glue = session.client("glue")
     try:
-        glue.create_database(DatabaseInput={"Name": database, "Description": "Amazon Quick Observability Data Lake"})
+        database_input = {
+            "Name": database,
+            "Description": "Amazon Quick Observability Data Lake",
+        }
+        if not use_lf:
+            database_input["CreateTableDefaultPermissions"] = [
+                {
+                    "Principal": {"DataLakePrincipalIdentifier": "IAM_ALLOWED_PRINCIPALS"},
+                    "Permissions": ["ALL"],
+                }
+            ]
+        glue.create_database(DatabaseInput=database_input)
         print(f"  ✓ Created database: {database}")
     except glue.exceptions.AlreadyExistsException:
         print(f"  ✓ Database already exists: {database}")
@@ -309,6 +349,23 @@ def main():
         print(f"  ✗ Failed to create database: {e}")
         return 1
     print()
+
+    # In IAM mode, some accounts still enforce Lake Formation permissions.
+    # Add IAM_ALLOWED_PRINCIPALS grants so Athena DDL can create external
+    # tables on the data lake paths.
+    if not use_lf:
+        try:
+            lf = session.client("lakeformation", region_name=args.region)
+            print("  Configuring Lake Formation compatibility grants for IAM mode")
+            lf_enable_iam_mode_compat(lf, account_id, database, s3_arn, caller_arn)
+            print("  ✓ Lake Formation IAM compatibility grants configured")
+            print()
+        except Exception as e:
+            print(f"  ⚠ Could not configure Lake Formation IAM compatibility grants: {e}")
+            print("    If table creation fails with Lake Formation permission errors,")
+            print("    ask a Lake Formation admin to grant DATA_LOCATION_ACCESS on")
+            print(f"    {s3_arn} to: {caller_arn}")
+            print()
 
     # ── Lake Formation: database-level grants (database must exist) ───────
     if use_lf:

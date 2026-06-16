@@ -64,11 +64,11 @@ class PipelineStack(Stack):
         # S3 Data Lake
         # ====================================================================
         # Data Lake Bucket - stores actual data (logs, events, metrics)
-        # Include account_id for global uniqueness
+        # Let CloudFormation generate a unique bucket name to avoid collisions
+        # with retained/orphaned buckets from previous failed deployments.
         self.data_lake_bucket = s3.Bucket(
             self,
             "DataLakeBucket",
-            bucket_name=f"{stack_name.lower()}-datalake-{account_id}",
             encryption=s3.BucketEncryption.KMS,
             encryption_key=self.data_lake_key,
             bucket_key_enabled=True,
