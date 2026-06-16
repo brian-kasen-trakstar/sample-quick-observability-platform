@@ -469,6 +469,21 @@ def main():
         "agentHoursLogsGroup": agent_hours_logs,
         "indexUsageLogsGroup": index_usage_logs,
     }
+
+    # Iceberg refresh schedule context (used by PipelineStack).
+    # Enable only after Iceberg is selected in datacatalog step.
+    iceberg_enabled = cfg.get("TableFormat") == "iceberg"
+    context["enableIcebergSchedule"] = "true" if iceberg_enabled else "false"
+    context["icebergDatabase"] = cfg.get("Database", "quickobserve_db")
+    context["icebergRefreshSchedule"] = cfg.get("IcebergRefreshSchedule", "rate(30 minutes)")
+
+    if deploy_pipeline:
+        if iceberg_enabled:
+            print(f"  Iceberg refresh schedule: enabled ({context['icebergRefreshSchedule']})")
+            print(f"  Iceberg database: {context['icebergDatabase']}")
+        else:
+            print("  Iceberg refresh schedule: disabled")
+        print()
     if custom_agent_ids:
         agent_logs_list = [f"/aws/vendedlogs/quick/agent/{agent_id}" for agent_id in custom_agent_ids]
         context["customAgentIds"] = ",".join(custom_agent_ids)
@@ -557,6 +572,8 @@ def deploy_datacatalog():
     # Find pipeline stack outputs
     bucket = None
     kms_key_arn = None
+    glue_iceberg_job_name = None
+    glue_iceberg_role_arn = None
     region = None
     include_message_content = False
     for stack_name, stack_outputs in outputs.items():
@@ -569,6 +586,10 @@ def deploy_datacatalog():
                 region = match.group(1)
         if "IncludeMessageContent" in stack_outputs:
             include_message_content = stack_outputs["IncludeMessageContent"] == "true"
+        if "GlueIcebergJobName" in stack_outputs:
+            glue_iceberg_job_name = stack_outputs["GlueIcebergJobName"]
+        if "GlueIcebergRoleArn" in stack_outputs:
+            glue_iceberg_role_arn = stack_outputs["GlueIcebergRoleArn"]
 
     if not bucket:
         print("❌ Could not find DataLakeBucketName in stack outputs.")
@@ -667,10 +688,58 @@ def deploy_datacatalog():
         print("  ✓ Using IAM policies for access control (Lake Formation skipped)")
     print()
 
+    # Table format prompt
+    print("📝 Table storage format:")
+    print()
+    print("   1. External JSON tables (default)")
+    print("      Directly query Firehose JSON files in S3.")
+    print()
+    print("   2. Iceberg tables via Glue ETL")
+    print("      Runs Glue ETL to convert landed JSON logs to Iceberg Parquet tables.")
+    print("      Recommended if you need Athena + Snowflake Iceberg interoperability.")
+    print()
+    table_choice = input("  Choose table format [1/2] (default: 1): ").strip()
+    table_format = "iceberg" if table_choice == "2" else "external"
+    iceberg_refresh_schedule = cfg.get("IcebergRefreshSchedule", "rate(30 minutes)")
+
+    if table_format == "iceberg":
+        if glue_iceberg_job_name:
+            print(f"  ✓ Using Glue Iceberg job: {glue_iceberg_job_name}")
+        else:
+            print("❌ Glue Iceberg job output not found from pipeline stack.")
+            print("   Re-run: python3 deploy.py --pipeline")
+            sys.exit(1)
+        if not glue_iceberg_role_arn:
+            print("❌ Glue Iceberg role output not found from pipeline stack.")
+            print("   Re-run: python3 deploy.py --pipeline")
+            sys.exit(1)
+
+        print()
+        print("📝 Iceberg refresh schedule:")
+        print("   Enter an EventBridge schedule expression.")
+        print("   Examples: rate(30 minutes), rate(1 hour), cron(0/30 * * * ? *)")
+        iceberg_refresh_schedule = prompt(
+            "  Iceberg refresh schedule",
+            iceberg_refresh_schedule,
+        )
+
+        if not re.match(r"^(rate\(.+\)|cron\(.+\))$", iceberg_refresh_schedule):
+            print("❌ Invalid schedule expression.")
+            print("   Use EventBridge syntax, for example: rate(30 minutes)")
+            sys.exit(1)
+
+        print(f"  ✓ Iceberg refresh schedule: {iceberg_refresh_schedule}")
+    else:
+        print("  ✓ Using external JSON table format")
+    print()
+
     print(f"  Database:       {database}")
     print(f"  Workgroup:      {workgroup}")
     print(f"  Query Results:  {athena_output}")
     print(f"  Data Lake:      {bucket}")
+    print(f"  Table Format:   {table_format}")
+    if table_format == "iceberg":
+        print(f"  Refresh:        {iceberg_refresh_schedule}")
     print(f"  Access Control: {'Lake Formation' if use_lake_formation else 'IAM policies'}")
     print(f"  Region:         {region}")
     print()
@@ -696,6 +765,7 @@ def deploy_datacatalog():
         "--workgroup", workgroup,
         "--output-location", athena_output,
         "--access-control", access_mode,
+        "--table-format", table_format,
     ]
     if not using_env_credentials():
         catalog_cmd.extend(["--profile", profile])
@@ -703,6 +773,9 @@ def deploy_datacatalog():
         catalog_cmd.extend(["--kms-key-arn", kms_key_arn])
     if include_message_content:
         catalog_cmd.append("--include-message-content")
+    if table_format == "iceberg":
+        catalog_cmd.extend(["--glue-iceberg-job-name", glue_iceberg_job_name])
+        catalog_cmd.extend(["--glue-iceberg-role-arn", glue_iceberg_role_arn])
 
     if not using_env_credentials():
         os.environ["AWS_PROFILE"] = profile
@@ -730,6 +803,8 @@ def deploy_datacatalog():
         "Workgroup": workgroup,
         "OutputLocation": athena_output,
         "AccessControl": access_mode,
+        "TableFormat": table_format,
+        "IcebergRefreshSchedule": iceberg_refresh_schedule,
         "Region": region,
         "AWSProfile": profile,
     }
@@ -742,6 +817,8 @@ def deploy_datacatalog():
         "Database": database,
         "Workgroup": workgroup,
         "OutputLocation": athena_output,
+        "TableFormat": table_format,
+        "IcebergRefreshSchedule": iceberg_refresh_schedule,
     })
 
 

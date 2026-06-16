@@ -74,6 +74,96 @@ def run_athena_query(athena, query, database, workgroup, result_config):
         return False, str(e)
 
 
+def wait_for_glue_job(glue_client, job_name, run_id):
+    """Wait for a Glue job run to finish. Returns (success, state_detail)."""
+    while True:
+        resp = glue_client.get_job_run(JobName=job_name, RunId=run_id, PredecessorsIncluded=False)
+        run = resp.get("JobRun", {})
+        state = run.get("JobRunState", "UNKNOWN")
+        if state in ("SUCCEEDED", "FAILED", "STOPPED", "TIMEOUT", "ERROR"):
+            detail = run.get("ErrorMessage") or run.get("StateDetail") or state
+            return state == "SUCCEEDED", detail
+        time.sleep(10)
+
+
+def run_glue_iceberg_job(glue_client, job_name, database, bucket, include_message_content):
+    """Start and wait for the Glue Iceberg ETL job."""
+    print(f"  Starting Glue Iceberg job: {job_name}")
+
+    # If the job is already running (max_concurrent_runs=1), wait for it to finish
+    # before submitting a new run to avoid ConcurrentRunsExceededException.
+    try:
+        running = glue_client.get_job_runs(JobName=job_name, MaxResults=5).get("JobRuns", [])
+        active = [r for r in running if r.get("JobRunState") in ("STARTING", "RUNNING", "STOPPING")]
+        if active:
+            active_run_id = active[0]["Id"]
+            print(f"  ⚠ Job already running ({active_run_id}), waiting for it to finish...")
+            ok, detail = wait_for_glue_job(glue_client, job_name, active_run_id)
+            if ok:
+                print(f"  ✓ Previous run completed; starting fresh run")
+            else:
+                print(f"  ⚠ Previous run ended with: {detail}; starting fresh run")
+    except Exception as e:
+        print(f"  ⚠ Could not check for active runs: {e}")
+
+    resp = glue_client.start_job_run(
+        JobName=job_name,
+        Arguments={
+            "--database": database,
+            "--bucket": bucket,
+            "--include_message_content": "true" if include_message_content else "false",
+        },
+    )
+    run_id = resp["JobRunId"]
+    print(f"  ✓ Glue job started: {run_id}")
+    ok, detail = wait_for_glue_job(glue_client, job_name, run_id)
+    if ok:
+        print(f"  ✓ Glue Iceberg job completed")
+    else:
+        print(f"  ✗ Glue Iceberg job failed: {detail}")
+    return ok, detail
+
+
+def table_exists(glue_client, database, table_name):
+    """Return True if a Glue table exists."""
+    try:
+        glue_client.get_table(DatabaseName=database, Name=table_name)
+        return True
+    except glue_client.exceptions.EntityNotFoundException:
+        return False
+    except Exception:
+        return False
+
+
+def table_is_iceberg(glue_client, database, table_name):
+    """Return True when a Glue table is Iceberg-backed."""
+    try:
+        resp = glue_client.get_table(DatabaseName=database, Name=table_name)
+        table = resp.get("Table", {})
+        params = table.get("Parameters", {}) or {}
+        # Athena/Glue-created Iceberg tables set table_type=ICEBERG.
+        return str(params.get("table_type", "")).upper() == "ICEBERG"
+    except glue_client.exceptions.EntityNotFoundException:
+        return False
+    except Exception:
+        return False
+
+
+def drop_non_iceberg_tables(glue_client, database, table_names):
+    """Drop legacy non-Iceberg tables so Glue can create Iceberg tables with same names."""
+    dropped = []
+    for table_name in table_names:
+        if not table_exists(glue_client, database, table_name):
+            continue
+        if table_is_iceberg(glue_client, database, table_name):
+            continue
+        print(f"  ⚠ Found existing non-Iceberg table: {database}.{table_name}")
+        glue_client.delete_table(DatabaseName=database, Name=table_name)
+        print(f"  ✓ Dropped legacy table: {database}.{table_name}")
+        dropped.append(table_name)
+    return dropped
+
+
 def get_qs_role_arn(iam_client):
     """Find the Quick Sight service role ARN, or None."""
     try:
@@ -237,6 +327,12 @@ def main():
     parser.add_argument("--kms-key-arn", help="KMS key ARN (used with lakeformation)")
     parser.add_argument("--include-message-content", action="store_true",
                         help="Add user_message and system_text_message columns to chat_logs table")
+    parser.add_argument("--table-format", choices=["external", "iceberg"], default="external",
+                        help="Storage format for Athena/Glue tables")
+    parser.add_argument("--glue-iceberg-job-name",
+                        help="Glue ETL job name for raw-to-Iceberg conversion (required for table-format=iceberg)")
+    parser.add_argument("--glue-iceberg-role-arn",
+                        help="Glue ETL role ARN (used to grant Lake Formation permissions for Iceberg writes)")
     args = parser.parse_args()
 
     # Validate inputs
@@ -284,6 +380,7 @@ def main():
 
     print(f"Setting up data catalog: {database}")
     print(f"  Access control: {'Lake Formation' if use_lf else 'IAM policies'}")
+    print(f"  Table format: {'Iceberg (via Glue ETL)' if args.table_format == 'iceberg' else 'External JSON'}")
     print(f"  Data lake bucket: {bucket}")
     print(f"  Workgroup: {args.workgroup}")
     print(f"  Caller: {caller_arn}")
@@ -383,39 +480,108 @@ def main():
             else:
                 errors.append(f"Lake Formation: grant DESCRIBE on database to Amazon Quick")
 
+        # In Iceberg mode, Glue ETL writes table metadata and data files, so
+        # it needs Lake Formation permissions on data location and database.
+        if args.table_format == "iceberg" and args.glue_iceberg_role_arn:
+            print("  Granting Lake Formation permissions to Glue Iceberg role")
+            if lf_grant(lf, args.glue_iceberg_role_arn, resource_loc, ["DATA_LOCATION_ACCESS"]):
+                print("  ✓ Granted DATA_LOCATION_ACCESS to Glue Iceberg role")
+            else:
+                errors.append("Lake Formation: grant DATA_LOCATION_ACCESS to Glue Iceberg role")
+
+            if lf_grant(
+                lf,
+                args.glue_iceberg_role_arn,
+                resource_db,
+                ["CREATE_TABLE", "ALTER", "DROP", "DESCRIBE"],
+            ):
+                print("  ✓ Granted database permissions to Glue Iceberg role")
+            else:
+                errors.append("Lake Formation: grant database permissions to Glue Iceberg role")
+
         print()
 
-    # ── Create Athena tables ──────────────────────────────────────────────
+    # ── Create or populate tables ─────────────────────────────────────────
     athena = session.client("athena")
     result_config = {"OutputLocation": args.output_location}
     queries_dir = Path(__file__).parent.parent / "sql"
 
-    print("Creating tables")
-    for table in TABLES:
-        sql_file = queries_dir / f"create_{table}_table.sql"
-        if not sql_file.exists():
-            print(f"  ⚠ SQL file not found: {sql_file}")
-            errors.append(f"Table: SQL file not found: {sql_file}")
-            continue
-        print(f"  Creating table: {database}.{table}")
-        query = sql_file.read_text()
-        query = query.replace("${DATABASE}", database).replace("${BUCKET}", bucket)
+    if args.table_format == "iceberg":
+        if not args.glue_iceberg_job_name:
+            print("✗ --glue-iceberg-job-name is required when --table-format=iceberg")
+            return 1
+        if use_lf and not args.glue_iceberg_role_arn:
+            print("✗ --glue-iceberg-role-arn is required with Lake Formation + Iceberg mode")
+            return 1
 
-        # If message content is included, add user_message and system_text_message
-        # columns to the chat_logs table so they're queryable in Athena.
-        if table == "chat_logs" and args.include_message_content:
-            query = query.replace(
-                "  web_search STRING\n",
-                "  web_search STRING,\n  user_message STRING,\n  system_text_message STRING\n",
+        print("Building Iceberg tables with Glue ETL")
+        glue_etl = session.client("glue", region_name=args.region)
+
+        # If tables already exist from the external JSON implementation,
+        # remove only the non-Iceberg ones so Glue can recreate them as Iceberg.
+        try:
+            dropped = drop_non_iceberg_tables(glue, database, TABLES)
+            if dropped:
+                print(f"  ✓ Removed {len(dropped)} non-Iceberg table(s) before Iceberg conversion")
+        except Exception as e:
+            print(f"  ✗ Failed while preparing legacy tables for Iceberg conversion: {e}")
+            errors.append(f"Iceberg table preparation: {e}")
+
+        try:
+            ok, detail = run_glue_iceberg_job(
+                glue_etl,
+                args.glue_iceberg_job_name,
+                database,
+                bucket,
+                args.include_message_content,
             )
+            if not ok:
+                errors.append(f"Glue Iceberg job failed: {detail}")
+        except Exception as e:
+            print(f"  ✗ Failed to run Glue Iceberg job: {e}")
+            errors.append(f"Glue Iceberg job: {e}")
 
-        ok, reason = run_athena_query(athena, query, database, args.workgroup, result_config)
-        if ok:
-            print(f"  ✓ Created table: {database}.{table}")
-        else:
-            print(f"  ✗ Failed: {database}.{table}: {reason}")
-            errors.append(f"Table: {database}.{table}: {reason}")
-    print()
+        for table in TABLES:
+            if table_exists(glue, database, table):
+                print(f"  ✓ Iceberg table available: {database}.{table}")
+            else:
+                print(f"  ✗ Missing Iceberg table: {database}.{table}")
+                errors.append(f"Table: {database}.{table}: not created by Glue job")
+        print()
+
+        # Avoid cascading failures (views/LF per-table grants) when Iceberg
+        # base tables are missing.
+        missing_base_tables = [t for t in TABLES if not table_exists(glue, database, t)]
+        if missing_base_tables:
+            print("✗ Iceberg base tables are missing; skipping view creation and table grants.")
+            return 1
+    else:
+        print("Creating tables")
+        for table in TABLES:
+            sql_file = queries_dir / f"create_{table}_table.sql"
+            if not sql_file.exists():
+                print(f"  ⚠ SQL file not found: {sql_file}")
+                errors.append(f"Table: SQL file not found: {sql_file}")
+                continue
+            print(f"  Creating table: {database}.{table}")
+            query = sql_file.read_text()
+            query = query.replace("${DATABASE}", database).replace("${BUCKET}", bucket)
+
+            # If message content is included, add user_message and system_text_message
+            # columns to the chat_logs table so they're queryable in Athena.
+            if table == "chat_logs" and args.include_message_content:
+                query = query.replace(
+                    "  web_search STRING\n",
+                    "  web_search STRING,\n  user_message STRING,\n  system_text_message STRING\n",
+                )
+
+            ok, reason = run_athena_query(athena, query, database, args.workgroup, result_config)
+            if ok:
+                print(f"  ✓ Created table: {database}.{table}")
+            else:
+                print(f"  ✗ Failed: {database}.{table}: {reason}")
+                errors.append(f"Table: {database}.{table}: {reason}")
+        print()
 
     # ── Create Athena views ───────────────────────────────────────────────
     print("Creating views")

@@ -151,6 +151,8 @@ Provisions (via CDK — PipelineStack, imports KMS key from Step 1):
 - Firehose delivery streams (128 MB / 900s buffer, GZIP compression, customer-managed KMS encryption) for chat, feedback, agent-hours, index-usage, cloudtrail — S3 write scoped to specific prefixes (`cloudwatch-logs/*`, `cloudtrail/*`, `errors/*`)
 - Subscription Filters connecting Step 1 log groups to Firehose (via a CloudWatch Logs IAM role)
 - EventBridge rule filtering `source: aws.quicksight`, `detail-type: ["AWS API Call via CloudTrail", "AWS Service Event via CloudTrail"]` — routes to CloudTrail Firehose via an EventBridge IAM role
+- Glue Iceberg ETL job (`{prefix}-pipeline-iceberg-etl`) that reads landed raw JSON logs and writes Iceberg Parquet tables into `s3://{datalake-bucket}/iceberg/`
+- Optional EventBridge schedule (`{prefix}-pipeline-IcebergRefresh`) that runs the Glue Iceberg ETL job periodically (enabled automatically once Iceberg mode is selected in Step 3)
 
 Prompts for: confirmation only. Uses saved resource prefix, AWS CLI profile, and region from Step 1. Reads KMS key and log group config from Step 1 outputs.
 
@@ -180,6 +182,10 @@ Runs `scripts/setup_datacatalog.py` which provisions:
   - `querydatabase_events` — database query events from CloudTrail with datasource_id, query_id, dashboard_or_analysis_id, dataset_id, dataset_mode
   - `index_usage` — per-source storage metrics with consumed_index_size_gb, consumed_source_size_gb, consumed_source_size_mb, source_type (SPACE, KB), source_name, consumed_source_doc_count, user_name extraction
 - Lake Formation permissions (optional — prompted during setup): S3 data location registration, KMS key policy update for Lake Formation service-linked role, DATA_LOCATION_ACCESS grants, database-level grants, per-table SELECT/DESCRIBE grants for the caller and Quick Sight service role. When message content logging is enabled, the Quick Sight service role grant on `chat_logs` uses column-level exclusion to prevent access to `user_message` and `system_text_message` — the admin caller retains full access to all columns.
+
+Step 3 now prompts for table storage format:
+- **External JSON tables (default)** — same behavior as before (directly queries landed Firehose JSON files).
+- **Iceberg tables via Glue ETL** — starts the Glue Iceberg ETL job from Step 2, creates/updates Iceberg tables (`chat_logs`, `feedback_logs`, `agent_hours_logs`, `cloudtrail_events`, `index_usage_logs`), then creates views on top.
 
 Prompts for: AWS CLI profile, Athena database name, workgroup name, S3 location for query results, and access control mode (Lake Formation or IAM). If message content logging was enabled in Step 1, the `chat_logs` table includes `user_message` and `system_text_message` columns.
 
